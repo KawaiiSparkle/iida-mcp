@@ -90,8 +90,9 @@ TOOLS_SCHEMA = [
     _t("get_name", "Get name/label at address", {"f": _F, "a": _A}),
     _t("set_name", "Set name/label at address", {"f": _F, "a": _A, "name": {"type":"string","description":"new name"}}),
     _t("get_comment", "Get comment at address", {"f": _F, "a": _A, "rep": {"type":"integer","description":"1=repeatable","optional":True}}),
-    _t("set_comment", "Set comment at address", {"f": _F, "a": _A, "cmt": {"type":"string","description":"comment text"}, "rep": {"type":"integer","description":"1=repeatable","optional":True}}),
+        _t("set_comment", "Set comment at address", {"f": _F, "a": _A, "cmt": {"type":"string","description":"comment text"}, "rep": {"type":"integer","description":"1=repeatable","optional":True}}),
     _t("set_pseudocode_comment", "Set Hex-Rays pseudocode comment at address", {"f": _F, "a": _A, "cmt": {"type":"string","description":"comment text"}, "rep": {"type":"integer","description":"1=repeatable","optional":True}}),
+    _t("set_comment", "Set comment at address (both disassembly and decompiler/pseudocode views)", {"f": _F, "a": _A, "cmt": {"type":"string","description":"comment text"}, "rep": {"type":"integer","description":"1=repeatable","optional":True}}),
     _t("search_names", "Search all names/labels by substring", {"f": _F, "q": {"type":"string","description":"substring"}, "n": _N}),
     _t("list_globals", "List named non-function globals (paginated, filterable)", {"f": _F, "q": _Q, "off": _OFF, "n": _N}),
     _t("read_global", "Read a named global value", {"f": _F, "name": {"type":"string","description":"global name"}, "sz": {"type":"integer","description":"override byte size","optional":True}}),
@@ -831,7 +832,49 @@ def _sc(args):
     cmt = args['cmt']
     rep = args.get('rep', 0)
     def _impl():
+        # Set disassembly comment (always works)
         ida_bytes.set_cmt(ea, cmt, bool(rep))
+
+        # Set decompiler (Hex-Rays) comment so it also shows in pseudocode view
+        try:
+            import ida_hexrays
+            if not ida_hexrays.init_hexrays_plugin():
+                return 'ok'
+
+            cfunc = ida_hexrays.decompile(ea)
+            if not cfunc:
+                return 'ok'
+
+            if ea == cfunc.entry_ea:
+                # Function-level comment in decompiler view
+                idc.set_func_cmt(ea, cmt, True)
+                cfunc.refresh_func_ctext()
+                return 'ok'
+
+            # Line-level comment: find nearest ea in ctree eamap
+            eamap = cfunc.get_eamap()
+            if ea not in eamap:
+                return 'ok'
+            nearest_ea = eamap[ea][0].ea
+
+            if cfunc.has_orphan_cmts():
+                cfunc.del_orphan_cmts()
+                cfunc.save_user_cmts()
+
+            tl = ida_hexrays.treeloc_t()
+            tl.ea = nearest_ea
+            for itp in range(ida_hexrays.ITP_SEMI, ida_hexrays.ITP_COLON):
+                tl.itp = itp
+                cfunc.set_user_cmt(tl, cmt)
+                cfunc.save_user_cmts()
+                cfunc.refresh_func_ctext()
+                if not cfunc.has_orphan_cmts():
+                    break
+                cfunc.del_orphan_cmts()
+                cfunc.save_user_cmts()
+        except Exception:
+            pass  # Hex-Rays not available or decompilation failed; disassembly comment is enough
+
         return 'ok'
     return write(_impl)
 
@@ -2407,14 +2450,58 @@ def _batch_set_names(args):
 def _batch_set_comments(args):
     entries = args['comments']
     def _impl():
+        hexrays_ok = False
+        import_id = None
         for item in entries:
             ea = _ea(item[0])
             text = item[1]
             rep = bool(item[2]) if len(item) > 2 else False
             ida_bytes.set_cmt(ea, text, rep)
+
+            # Set decompiler (Hex-Rays) comment for pseudocode view
+            try:
+                if not hexrays_ok:
+                    import ida_hexrays as _hr
+                    import_id = _hr
+                    hexrays_ok = import_id.init_hexrays_plugin()
+
+                if not hexrays_ok:
+                    continue
+
+                cfunc = import_id.decompile(ea)
+                if not cfunc:
+                    continue
+
+                if ea == cfunc.entry_ea:
+                    idc.set_func_cmt(ea, text, True)
+                    cfunc.refresh_func_ctext()
+                    continue
+
+                eamap = cfunc.get_eamap()
+                if ea not in eamap:
+                    continue
+                nearest_ea = eamap[ea][0].ea
+
+                if cfunc.has_orphan_cmts():
+                    cfunc.del_orphan_cmts()
+                    cfunc.save_user_cmts()
+
+                tl = import_id.treeloc_t()
+                tl.ea = nearest_ea
+                for itp in range(import_id.ITP_SEMI, import_id.ITP_COLON):
+                    tl.itp = itp
+                    cfunc.set_user_cmt(tl, text)
+                    cfunc.save_user_cmts()
+                    cfunc.refresh_func_ctext()
+                    if not cfunc.has_orphan_cmts():
+                        break
+                    cfunc.del_orphan_cmts()
+                    cfunc.save_user_cmts()
+            except Exception:
+                pass  # Hex-Rays not available or decompilation failed
+
         return {'ok': len(entries)}
     return write(_impl)
-
 
 def _batch_set_types(args):
     entries = args['types']
