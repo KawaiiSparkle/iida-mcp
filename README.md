@@ -6,10 +6,10 @@
 
 `iida-mcp` 是一个 IDA Pro 插件，通过本地 HTTP MCP 服务暴露当前 IDB 的静态分析能力。
 
-该 MCP 主要面向 x86/x86-64 架构可执行文件及对应 IDA 能力设计；如果有其他需求，请提出 issue。
+该 MCP 主要在 x86/x86-64 架构可执行文件及对应 IDA 能力上测试。核心 IDA API 工具、`disasm_bytes` 和 `patch_asm` 同时支持 ARMv8-A/AArch64（`arm64`、`aarch64`、`armv8`、`armv8a`、`armv8-a`）。ARM32/Thumb 目前属于尽力支持范围。
 
 - 77 个 MCP 工具
-- 主要兼容 IDA 8+，包括 IDA 9.x
+- 已在 IDA 9.3 验证；IDA 8+/9.x API 兼容尽力保持
 - 支持多 IDA 实例自动路由
 - 可选 Windows 内核驱动能力
 - 快捷键：`Alt+Shift+I`
@@ -26,22 +26,24 @@
 
 ## 安装
 
-把 `iida.py` 和 `iida_core/` 复制到 IDA 的 `plugins/` 目录：
+把整个插件目录复制到 IDA 的 `plugins/` 目录。IDA 9.x/HCLI 插件元数据由 `ida-plugin.json` 描述：
 
 ```text
 plugins/
-  iida.py
-  iida_core/
-    __init__.py
-    cache.py
-    kdriver.py
-    protocol.py
-    registry.py
-    router.py
-    server.py
-    thread_safe.py
-    tools.py
-    worker.py
+  iida_mcp/
+    ida-plugin.json
+    iida.py
+    iida_core/
+      __init__.py
+      cache.py
+      kdriver.py
+      protocol.py
+      registry.py
+      router.py
+      server.py
+      thread_safe.py
+      tools.py
+      worker.py
 ```
 
 ## 使用
@@ -82,12 +84,21 @@ http://192.168.153.1:13897/mcp
 
 不同终端或客户端的字段名可能略有差异；核心是使用 HTTP MCP 连接到 `http://127.0.0.1:13897/mcp`。
 
+注意：MCP HTTP 服务当前不做鉴权，并监听所有网卡。远程客户端可以调用重命名、注释、类型修改和补丁写入类工具；插件还会自动确认 IDA 的阻塞提示框。只应在可信网络中使用，或通过本机防火墙限制访问来源。
+
+兼容性说明：
+
+- `set_comment` 保持旧行为，只写反汇编注释；需要写入 Hex-Rays 伪代码注释时使用 `set_pseudocode_comment`。
+- `parse_elf` 默认返回精简元数据和依赖信息；传 `detail=full` 才返回 sections、dynamic、symbols、relocations 等采样字段。
+
 ## 依赖
 
 插件主体只依赖 IDA 自带的 IDAPython 和 Python 标准库。
 
 - 反编译相关工具需要 Hex-Rays Decompiler。
 - `disasm_bytes` 需要在 IDA 的 Python 环境中安装 `capstone`。未安装时会返回 `capstone not installed (pip install capstone)`。
+- `patch_asm` 需要在 IDA 的 Python 环境中安装 `keystone-engine`。AArch64 支持 `arm64`、`aarch64`、`armv8a` 等别名，示例汇编包括 `nop`、`ret`、`mov x0, #1`。
+- 通过 HCLI 安装时，`ida-plugin.json` 会声明并安装 `capstone` 与 `keystone-engine`，以覆盖完整工具集。
 - 内核相关工具需要加载 `iida-mcp-ioctl` 驱动。
 
 ## 内核驱动
@@ -108,3 +119,4 @@ http://192.168.153.1:13897/mcp
 |------|------|
 | `13897` | MCP HTTP 服务，监听所有网卡 |
 | `13898` | 内部 Worker 通信，仅本机 |
+| `13899` | 多 IDA 实例选主锁，仅本机 |

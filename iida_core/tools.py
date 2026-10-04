@@ -27,6 +27,7 @@ import idc
 
 from .thread_safe import read, write
 from .cache import get_cache
+from .elf import parse_elf
 
 # ============================================================
 # Tool schema definitions (MCP tools/list response)
@@ -70,7 +71,7 @@ TOOLS_SCHEMA = [
     _t("read_file_bytes", "Read raw original file bytes at file offset", {"f": _F, "off": {"type":"integer","description":"file offset"}, "sz": {"type":"integer","description":"size"}}),
     _t("addr_to_fileoff", "Convert IDB address to raw file offset", {"f": _F, "a": _A}),
     _t("parse_pe", "Parse PE header from raw file", {"f": _F}),
-    _t("parse_elf", "Parse ELF header from raw file", {"f": _F}),
+    _t("parse_elf", "Parse ELF metadata; use detail=full for section/symbol/reloc samples", {"f": _F, "detail": {"type":"string","description":"summary/full (default summary)","optional":True}, "limit": {"type":"integer","description":"max sample rows per heavy table (default 128)","optional":True}}),
     _t("get_cursor", "Get the current IDA UI cursor address", {"f": _F}),
     _t("get_cursor_func", "Get the function under the current IDA UI cursor", {"f": _F}),
     _t("list_functions", "List functions (paginated, filterable)", {"f": _F, "q": _Q, "off": _OFF, "n": _N}),
@@ -90,6 +91,7 @@ TOOLS_SCHEMA = [
     _t("set_name", "Set name/label at address", {"f": _F, "a": _A, "name": {"type":"string","description":"new name"}}),
     _t("get_comment", "Get comment at address", {"f": _F, "a": _A, "rep": {"type":"integer","description":"1=repeatable","optional":True}}),
     _t("set_comment", "Set comment at address", {"f": _F, "a": _A, "cmt": {"type":"string","description":"comment text"}, "rep": {"type":"integer","description":"1=repeatable","optional":True}}),
+    _t("set_pseudocode_comment", "Set Hex-Rays pseudocode comment at address", {"f": _F, "a": _A, "cmt": {"type":"string","description":"comment text"}, "rep": {"type":"integer","description":"1=repeatable","optional":True}}),
     _t("search_names", "Search all names/labels by substring", {"f": _F, "q": {"type":"string","description":"substring"}, "n": _N}),
     _t("list_globals", "List named non-function globals (paginated, filterable)", {"f": _F, "q": _Q, "off": _OFF, "n": _N}),
     _t("read_global", "Read a named global value", {"f": _F, "name": {"type":"string","description":"global name"}, "sz": {"type":"integer","description":"override byte size","optional":True}}),
@@ -114,7 +116,7 @@ TOOLS_SCHEMA = [
     _t("list_entries", "List entry points", {"f": _F}),
     _t("get_cfg", "Get function control flow graph as basic block nodes and edges", {"f": _F, "a": _A}),
     _t("patch_bytes", "Patch bytes in IDB at address (modifies database)", {"f": _F, "a": _A, "hex": {"type":"string","description":"hex bytes to write"}}),
-    _t("patch_asm", "Assemble one or more instructions with keystone and patch bytes at address", {"f": _F, "a": _A, "asm": {"type":"string","description":"assembly text, e.g. nop or mov rax, 1"}}),
+    _t("patch_asm", "Assemble one or more instructions with keystone and patch bytes at address", {"f": _F, "a": _A, "asm": {"type":"string","description":"assembly text, e.g. nop, ret, mov rax, 1, or mov x0, #1"}}),
     _t("patch_list", "List all patched bytes in IDB", {"f": _F}),
     _t("bookmark_list", "List all bookmarks", {"f": _F}),
     _t("bookmark_set", "Set bookmark at address", {"f": _F, "a": _A, "desc": {"type":"string","description":"description"}}),
@@ -139,7 +141,7 @@ TOOLS_SCHEMA = [
     _t("kernel_modules", "List all loaded kernel modules via driver. Returns [[base_hex, size, name, path], ...]"),
     _t("kernel_module_base", "Get kernel module base address and size by name via driver. Returns [base_hex, size]", {"name": {"type":"string","description":"module name, e.g. ntoskrnl or nvlddmkm"}}),
     _t("calc", "Integer calculator. Evaluate arithmetic expression with hex(0x)/dec/oct(0o)/bin(0b). Supports + - * / % ** << >> & | ^ ~. Returns [dec, hex]", {"expr": {"type":"string","description":"expression, e.g. 0xfffff804+0x1000*3"}}),
-    _t("disasm_bytes", "Disassemble raw hex bytes (no IDB needed). Returns [[offset, hex, mnemonic, operands], ...]", {"hex": {"type":"string","description":"hex bytes, e.g. 4889e5 or 48 89 e5"}, "arch": {"type":"string","description":"x86/x64/arm/arm64 (default x64)","optional":True}, "addr": {"type":"string","description":"base address for display (default 0)","optional":True}}),
+    _t("disasm_bytes", "Disassemble raw hex bytes (no IDB needed). Returns [[offset, hex, mnemonic, operands], ...]", {"hex": {"type":"string","description":"hex bytes, e.g. 1f2003d5 or 48 89 e5"}, "arch": {"type":"string","description":"x86/x64/arm/arm64/aarch64/armv8a (default x64)","optional":True}, "addr": {"type":"string","description":"base address for display (default 0)","optional":True}}),
     _t("kernel_read_values", "Read kernel memory and interpret as typed values. Use a for one address or addrs for batch. fmt defaults to p(pointer).", {"a": {"type":"string","description":"single kernel virtual address (hex)","optional":True}, "addrs": {"type":"array","description":"batch kernel virtual addresses [hex_addr, ...]","items":{"type":"string"},"optional":True}, "fmt": {"type":"string","description":"format: p(pointer/u64) d(u32) w(u16) b(u8) s(null-term string) or NNx(raw bytes). e.g. p, ppd, 16x. default p","optional":True}}),
     _t("ida_to_runtime", "Convert IDA virtual address to runtime kernel address. Uses runtime module base from driver + IDA segment info to compute correct mapping per-section.", {"f": _F, "a": _A, "mod": {"type":"string","description":"kernel module name (e.g. nvlddmkm)","optional":True}}),
 ]
@@ -492,57 +494,7 @@ def _pe(args):
 
 def _elf(args):
     path = read(_get_input_path)
-    with open(path, 'rb') as fp:
-        ident = fp.read(16)
-        if ident[:4] != b'\x7fELF':
-            return {'e': 'not ELF'}
-        ei_class = ident[4]  # 1=32, 2=64
-        ei_data = ident[5]   # 1=LE, 2=BE
-        endian = '<' if ei_data == 1 else '>'
-        is64 = ei_class == 2
-
-        if is64:
-            hdr = fp.read(48)
-            etype, machine = pystruct.unpack_from(endian + 'HH', hdr, 0)
-            entry = pystruct.unpack_from(endian + 'Q', hdr, 8)[0]
-            phoff = pystruct.unpack_from(endian + 'Q', hdr, 16)[0]
-            shoff = pystruct.unpack_from(endian + 'Q', hdr, 24)[0]
-            phnum = pystruct.unpack_from(endian + 'H', hdr, 40)[0]
-            shnum = pystruct.unpack_from(endian + 'H', hdr, 44)[0]
-        else:
-            hdr = fp.read(36)
-            etype, machine = pystruct.unpack_from(endian + 'HH', hdr, 0)
-            entry = pystruct.unpack_from(endian + 'I', hdr, 8)[0]
-            phoff = pystruct.unpack_from(endian + 'I', hdr, 12)[0]
-            shoff = pystruct.unpack_from(endian + 'I', hdr, 16)[0]
-            phnum = pystruct.unpack_from(endian + 'H', hdr, 28)[0]
-            shnum = pystruct.unpack_from(endian + 'H', hdr, 30)[0]
-
-        phdrs = []
-        if phoff:
-            fp.seek(phoff)
-            for _ in range(min(phnum, 64)):
-                if is64:
-                    p = fp.read(56)
-                    ptype, pflags = pystruct.unpack_from(endian + 'II', p, 0)
-                    poff, pvaddr, pmemsz = pystruct.unpack_from(endian + 'QQQ', p, 8)[:3]
-                    phdrs.append([ptype, _hex(pvaddr), pmemsz, pflags])
-                else:
-                    p = fp.read(32)
-                    ptype = pystruct.unpack_from(endian + 'I', p, 0)[0]
-                    poff, pvaddr = pystruct.unpack_from(endian + 'II', p, 4)
-                    pmemsz = pystruct.unpack_from(endian + 'I', p, 20)[0]
-                    pflags = pystruct.unpack_from(endian + 'I', p, 24)[0]
-                    phdrs.append([ptype, _hex(pvaddr), pmemsz, pflags])
-
-        return {
-            'class': ei_class,
-            'machine': machine,
-            'entry': _hex(entry),
-            'type': etype,
-            'phdr': phdrs,
-            'shnum': shnum
-        }
+    return parse_elf(path, args.get('detail', 'summary'), args.get('limit', 128))
 
 
 # --- 4.3 Functions ---
@@ -881,6 +833,51 @@ def _sc(args):
     def _impl():
         ida_bytes.set_cmt(ea, cmt, bool(rep))
         return 'ok'
+    return write(_impl)
+
+
+def _set_pseudocode_comment(ea, cmt, rep=False):
+    try:
+        import ida_hexrays
+        if not ida_hexrays.init_hexrays_plugin():
+            return False, 'hexrays unavailable'
+
+        cfunc = ida_hexrays.decompile(ea)
+        if not cfunc:
+            return False, 'decompile failed'
+
+        if ea == cfunc.entry_ea:
+            idc.set_func_cmt(ea, cmt, bool(rep))
+            cfunc.refresh_func_ctext()
+            ok = (idc.get_func_cmt(ea, bool(rep)) or '') == cmt
+            return ok, '' if ok else 'function comment not saved'
+
+        eamap = cfunc.get_eamap()
+        if ea not in eamap:
+            return False, 'address not in pseudocode map'
+
+        nearest_ea = eamap[ea][0].ea
+        tl = ida_hexrays.treeloc_t()
+        tl.ea = nearest_ea
+        for itp in range(ida_hexrays.ITP_SEMI, ida_hexrays.ITP_COLON):
+            tl.itp = itp
+            cfunc.set_user_cmt(tl, cmt)
+            cfunc.save_user_cmts()
+            cfunc.refresh_func_ctext()
+            if cfunc.get_user_cmt(tl, ida_hexrays.RETRIEVE_ALWAYS) == cmt:
+                return True, ''
+        return False, 'user comment not saved'
+    except Exception as ex:
+        return False, str(ex)
+
+
+def _spc(args):
+    ea = _ea(args['a'])
+    cmt = args['cmt']
+    rep = args.get('rep', 0)
+    def _impl():
+        ok, reason = _set_pseudocode_comment(ea, cmt, bool(rep))
+        return {'ok': ok, 'e': reason} if not ok else {'ok': True}
     return write(_impl)
 
 
@@ -1826,6 +1823,37 @@ def _pat(args):
 _KS_CACHE = {}
 
 
+def _normalize_arch_name(arch, bits=None):
+    text = (arch or '').strip().lower().replace('_', '-')
+    text = text.replace(' ', '')
+    aliases = {
+        'amd64': 'x64',
+        'x86-64': 'x64',
+        'x86_64': 'x64',
+        'metapc64': 'x64',
+        'i386': 'x86',
+        'i686': 'x86',
+        'aarch64': 'arm64',
+        'arm64': 'arm64',
+        'armv8': 'arm64',
+        'armv8a': 'arm64',
+        'armv8-a': 'arm64',
+    }
+    if text in aliases:
+        return aliases[text]
+    if text.startswith('aarch64') or text.startswith('arm64') or text.startswith('armv8'):
+        return 'arm64'
+    if text.startswith('arm'):
+        return 'arm64' if bits == 64 else 'arm'
+    if text.startswith('metapc') or text.startswith('80'):
+        return 'x64' if bits == 64 else 'x86'
+    if text.startswith('mips'):
+        return 'mips'
+    if text.startswith('ppc'):
+        return 'ppc'
+    return text
+
+
 def _ks_for_idb():
     try:
         import keystone
@@ -1836,26 +1864,26 @@ def _ks_for_idb():
     is64 = ida_ida.inf_is_64bit()
     is32 = ida_ida.inf_is_32bit_exactly() if hasattr(ida_ida, 'inf_is_32bit_exactly') else not is64
     bits = 64 if is64 else (32 if is32 else 16)
-    key = (proc, bits)
+    proc_arch = _normalize_arch_name(proc, bits)
+    key = (proc_arch, bits)
     if key in _KS_CACHE:
         return _KS_CACHE[key], ''
 
     arch = None
     mode = None
-    if proc.startswith('metapc') or proc.startswith('80'):
+    if proc_arch in ('x86', 'x64'):
         arch = keystone.KS_ARCH_X86
         mode = keystone.KS_MODE_64 if bits == 64 else (keystone.KS_MODE_32 if bits == 32 else keystone.KS_MODE_16)
-    elif proc.startswith('arm'):
-        if bits == 64:
-            arch = keystone.KS_ARCH_ARM64
-            mode = keystone.KS_MODE_LITTLE_ENDIAN
-        else:
-            arch = keystone.KS_ARCH_ARM
-            mode = keystone.KS_MODE_ARM
-    elif proc.startswith('mips'):
+    elif proc_arch == 'arm64':
+        arch = keystone.KS_ARCH_ARM64
+        mode = keystone.KS_MODE_LITTLE_ENDIAN
+    elif proc_arch == 'arm':
+        arch = keystone.KS_ARCH_ARM
+        mode = keystone.KS_MODE_ARM
+    elif proc_arch == 'mips':
         arch = keystone.KS_ARCH_MIPS
         mode = (keystone.KS_MODE_MIPS64 if bits == 64 else keystone.KS_MODE_MIPS32) | keystone.KS_MODE_LITTLE_ENDIAN
-    elif proc.startswith('ppc'):
+    elif proc_arch == 'ppc':
         arch = keystone.KS_ARCH_PPC
         mode = (keystone.KS_MODE_PPC64 if bits == 64 else keystone.KS_MODE_PPC32) | keystone.KS_MODE_BIG_ENDIAN
 
@@ -2631,17 +2659,17 @@ def _disasm_bytes(args):
         return {'e': 'capstone not installed (pip install capstone)'}
 
     raw = bytes.fromhex(args['hex'].replace(' ', ''))
-    arch_str = args.get('arch', 'x64').lower()
+    arch_str = _normalize_arch_name(args.get('arch', 'x64'))
     base = _ea(args['addr']) if 'addr' in args else 0
 
     arch_map = {
         'x86':   (capstone.CS_ARCH_X86, capstone.CS_MODE_32),
         'x64':   (capstone.CS_ARCH_X86, capstone.CS_MODE_64),
         'arm':   (capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM),
-        'arm64': (capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM),
+        'arm64': (capstone.CS_ARCH_ARM64, getattr(capstone, 'CS_MODE_LITTLE_ENDIAN', 0)),
     }
     if arch_str not in arch_map:
-        return {'e': f'unknown arch: {arch_str}, use x86/x64/arm/arm64'}
+        return {'e': f'unknown arch: {arch_str}, use x86/x64/arm/arm64/aarch64/armv8a'}
 
     cs_arch, cs_mode = arch_map[arch_str]
     md = capstone.Cs(cs_arch, cs_mode)
@@ -2682,6 +2710,7 @@ DISPATCH = {
     'set_name': _sn,
     'get_comment': _gc,
     'set_comment': _sc,
+    'set_pseudocode_comment': _spc,
     'search_names': _an,
     'list_globals': _lg,
     'read_global': _rg,

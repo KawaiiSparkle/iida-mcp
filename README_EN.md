@@ -6,10 +6,10 @@
 
 `iida-mcp` is an IDA Pro plugin that exposes the current IDB through a local HTTP MCP server.
 
-This MCP is primarily designed for x86/x86-64 executables and the corresponding IDA capabilities. For other needs, please open an issue.
+This MCP is primarily tested on x86/x86-64 executables and the corresponding IDA capabilities. Core IDA API tools, `disasm_bytes`, and `patch_asm` also support ARMv8-A/AArch64 (`arm64`, `aarch64`, `armv8`, `armv8a`, `armv8-a`). ARM32/Thumb is currently best-effort.
 
 - 77 MCP tools
-- Mainly compatible with IDA 8+, including IDA 9.x
+- Verified on IDA 9.3; IDA 8+/9.x API compatibility is kept best-effort
 - Multi-IDA instance routing
 - Optional Windows kernel driver support
 - Hotkey: `Alt+Shift+I`
@@ -26,22 +26,24 @@ This MCP is primarily designed for x86/x86-64 executables and the corresponding 
 
 ## Installation
 
-Copy `iida.py` and `iida_core/` into IDA's `plugins/` directory:
+Copy the whole plugin directory into IDA's `plugins/` directory. IDA 9.x/HCLI plugin metadata is described by `ida-plugin.json`:
 
 ```text
 plugins/
-  iida.py
-  iida_core/
-    __init__.py
-    cache.py
-    kdriver.py
-    protocol.py
-    registry.py
-    router.py
-    server.py
-    thread_safe.py
-    tools.py
-    worker.py
+  iida_mcp/
+    ida-plugin.json
+    iida.py
+    iida_core/
+      __init__.py
+      cache.py
+      kdriver.py
+      protocol.py
+      registry.py
+      router.py
+      server.py
+      thread_safe.py
+      tools.py
+      worker.py
 ```
 
 ## Usage
@@ -82,12 +84,21 @@ Generic example:
 
 Client-specific field names may vary. The required target is the local HTTP MCP endpoint above.
 
+Note: the MCP HTTP server currently has no authentication and listens on all network interfaces. Remote clients can call renaming, commenting, type-editing, and patch-writing tools; the plugin also auto-confirms blocking IDA dialogs. Use it only on trusted networks, or restrict access with the local firewall.
+
+Compatibility notes:
+
+- `set_comment` keeps the old behavior and only writes disassembly comments. Use `set_pseudocode_comment` when a Hex-Rays pseudocode comment is needed.
+- `parse_elf` returns a compact metadata/dependency view by default; pass `detail=full` to include sampled sections, dynamic entries, symbols, and relocations.
+
 ## Dependencies
 
 The core plugin uses IDA's bundled IDAPython and the Python standard library.
 
 - Decompiler tools require Hex-Rays Decompiler.
 - `disasm_bytes` requires `capstone` in IDA's Python environment. If missing, it returns `capstone not installed (pip install capstone)`.
+- `patch_asm` requires `keystone-engine` in IDA's Python environment. AArch64 accepts aliases such as `arm64`, `aarch64`, and `armv8a`; sample assembly includes `nop`, `ret`, and `mov x0, #1`.
+- HCLI installs declare `capstone` and `keystone-engine` in `ida-plugin.json` so the full tool set is available.
 - Kernel tools require the `iida-mcp-ioctl` driver.
 
 ## Kernel Driver
@@ -108,3 +119,4 @@ A prebuilt `iida-mcp-ioctl.sys` is included under `driver/`. Loading it requires
 |------|---------|
 | `13897` | MCP HTTP server, listens on all network interfaces |
 | `13898` | Internal Worker communication, loopback only |
+| `13899` | Multi-IDA master election lock, loopback only |

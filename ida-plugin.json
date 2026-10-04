@@ -1,0 +1,39 @@
+{
+  "$schema": "https://hcli.docs.hex-rays.com/schemas/ida-plugin.json",
+  "IDAMetadataDescriptorVersion": 1,
+  "plugin": {
+    "name": "iida-mcp",
+    "version": "0.4.0",
+    "entryPoint": "iida.py",
+    "description": "Expose IDA Pro static analysis capabilities through a local MCP HTTP server.",
+    "categories": [
+      "api-scripting-and-automation",
+      "collaboration-and-productivity",
+      "integration-with-third-parties-interoperability"
+    ],
+    "keywords": [
+      "mcp",
+      "automation",
+      "idapython",
+      "static-analysis",
+      "aarch64",
+      "arm64"
+    ],
+    "urls": {
+      "repository": "https://github.com/saileaxh/iida-mcp"
+    },
+    "authors": [
+      {
+        "name": "saileaxh",
+        "email": "saileaxh@protonmail.com"
+      }
+    ],
+    "idaVersions": [
+      "9.3"
+    ],
+    "pythonDependencies": [
+      "capstone",
+      "keystone-engine"
+    ]
+  }
+}
