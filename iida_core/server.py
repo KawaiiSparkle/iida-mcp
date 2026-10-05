@@ -34,6 +34,26 @@ CAPABILITIES = {
     "resources": {}
 }
 
+# IDA SDK facts are only legal to query on the main thread, but /health is
+# served from an HTTP worker thread.  Main-thread callbacks (the plugin's timer
+# in GUI sessions, the pump loop in -A sessions) refresh this snapshot instead.
+_HEALTH_SNAPSHOT = {
+    'analysis_done': None,
+    'hexrays_ready': None,
+    'updated_at': 0.0,
+}
+
+
+def update_health_snapshot(analysis_done=None, hexrays_ready=None):
+    """Publish main-thread health facts for the /health endpoint."""
+    _HEALTH_SNAPSHOT['analysis_done'] = analysis_done
+    _HEALTH_SNAPSHOT['hexrays_ready'] = hexrays_ready
+    _HEALTH_SNAPSHOT['updated_at'] = time.time()
+
+
+def health_snapshot():
+    return dict(_HEALTH_SNAPSHOT)
+
 
 class McpHandler(BaseHTTPRequestHandler):
     """Handle MCP Streamable HTTP requests."""
@@ -305,7 +325,9 @@ class McpServer:
         """Fast, non-blocking instance health report (served on GET /health).
 
         Used by external launchers to detect readiness, the bound port and the
-        currently registered databases.
+        currently registered databases.  IDA SDK facts come from the snapshot
+        published by main-thread callbacks (see update_health_snapshot): this
+        runs on an HTTP worker thread where touching the SDK would be illegal.
         """
         files = []
         try:
@@ -321,18 +343,10 @@ class McpServer:
                 })
         except Exception:
             pass
-        analysis_done = None
-        try:
-            import ida_auto
-            analysis_done = bool(ida_auto.auto_is_ok())
-        except Exception:
-            pass
-        hexrays_ready = False
-        try:
-            import ida_hexrays
-            hexrays_ready = bool(ida_hexrays.init_hexrays_plugin())
-        except Exception:
-            pass
+        snapshot = health_snapshot()
+        age = None
+        if snapshot.get('updated_at'):
+            age = round(max(0.0, time.time() - snapshot['updated_at']), 2)
         return {
             'ok': True,
             'server': SERVER_INFO['name'],
@@ -341,8 +355,9 @@ class McpServer:
             'pid': os.getpid(),
             'python': sys.version.split()[0],
             'uptime_s': round(time.time() - self._started_at, 2),
-            'analysis_done': analysis_done,
-            'hexrays_ready': hexrays_ready,
+            'analysis_done': snapshot.get('analysis_done'),
+            'hexrays_ready': snapshot.get('hexrays_ready'),
+            'snapshot_age_s': age,
             'files': files,
         }
 

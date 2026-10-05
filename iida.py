@@ -254,6 +254,7 @@ class _McpUiHooks(ida_kernwin.UI_Hooks):
 
 
 _dialog_suppressor = None
+_health_timer_id = None
 
 
 def _reload_core_modules():
@@ -374,6 +375,60 @@ class IdaMcpPlugMod(idaapi.plugmod_t):
         self._start('autostart')
         return -1
 
+    def _health_tick(self):
+        """Keep the /health snapshot fresh (main thread, GUI sessions).
+
+        ``ida_auto.auto_is_ok()`` / ``init_hexrays_plugin()`` may only be called
+        from the main thread; /health is served from an HTTP worker thread, so
+        the answer is computed here and cached.
+        """
+        try:
+            from iida_core import server as _server
+        except Exception:
+            return 2000
+        done = None
+        try:
+            import ida_auto
+            done = bool(ida_auto.auto_is_ok())
+        except Exception:
+            pass
+        hexrays = None
+        try:
+            import ida_hexrays
+            hexrays = bool(ida_hexrays.init_hexrays_plugin())
+        except Exception:
+            pass
+        try:
+            _server.update_health_snapshot(done, hexrays)
+        except Exception:
+            pass
+        return 2000
+
+    def _arm_health_timer(self):
+        """Register the /health refresh timer (must happen on the main thread).
+
+        ``register_timer`` is an IDA kernel call: from a background thread it
+        deadlocks whenever the main thread is busy draining the pump, so hop to
+        the main thread first (pump in ``-A`` sessions, ``execute_sync`` in GUI
+        sessions).
+        """
+        global _health_timer_id
+        if _health_timer_id is not None:
+            return
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                from iida_core import thread_safe as _ts
+                _ts.run_in_ida(self._arm_health_timer, timeout=30.0)
+            except Exception as ex:
+                _log('health timer defer failed: %s' % ex)
+            return
+        try:
+            _health_timer_id = ida_kernwin.register_timer(2000, self._health_tick)
+            _log('health timer armed')
+        except Exception as ex:
+            _health_timer_id = None
+            _log('health timer unavailable: %s' % ex)
+
     def _thread_autostart(self, delay=2.0):
         """Safety net for modes where timers/UI hooks never fire."""
 
@@ -457,11 +512,20 @@ class IdaMcpPlugMod(idaapi.plugmod_t):
         _log('activating (%s)' % why)
         self._watch_thread = threading.Thread(target=self._supervise, daemon=True)
         self._watch_thread.start()
+        # Keep GET /health honest: IDA SDK queries happen here, on the main thread.
+        self._arm_health_timer()
 
     def _stop(self):
         """Stop serving; the supervisor thread exits on its next iteration."""
+        global _health_timer_id
         self._started = False
         self._gen += 1
+        if _health_timer_id is not None:
+            try:
+                ida_kernwin.unregister_timer(_health_timer_id)
+            except Exception:
+                pass
+            _health_timer_id = None
         self._teardown_network()
 
     def _supervise(self):

@@ -44,6 +44,7 @@ _written = False
 _timer_id = None
 _deadline = 0.0
 _boot_written = False
+_last_health = 0.0
 
 
 # --------------------------------------------------------------------------
@@ -123,6 +124,41 @@ def _analysis_done():
         return bool(ida_auto.auto_is_ok())
     except Exception:
         return True
+
+
+def _health_tick():
+    """Refresh the /health snapshot from the main thread (throttled).
+
+    In a ``-A`` session this script owns the main thread (the pump loop), so the
+    plugin's own health timer never fires; /health is served by an HTTP worker
+    thread and must not touch the SDK itself.
+    """
+    global _last_health
+    now = time.time()
+    if now - _last_health < 2.0:
+        return
+    _last_health = now
+    try:
+        import importlib
+        server = sys.modules.get('iida_core.server') or importlib.import_module('iida_core.server')
+    except Exception:
+        return
+    done = None
+    try:
+        import ida_auto
+        done = bool(ida_auto.auto_is_ok())
+    except Exception:
+        pass
+    hexrays = None
+    try:
+        import ida_hexrays
+        hexrays = bool(ida_hexrays.init_hexrays_plugin())
+    except Exception:
+        pass
+    try:
+        server.update_health_snapshot(done, hexrays)
+    except Exception:
+        pass
 
 
 def _find_instance(pid):
@@ -425,7 +461,7 @@ def main():
                      name='iida-mcp-watch').start()
     _log('taking over the main thread (pump); HTTP tools stay responsive')
     try:
-        pump.run(idle=0.02)
+        pump.run(idle=0.02, on_tick=_health_tick)
     except Exception as ex:
         _log('pump loop failed: %s' % ex)
     _log('main-thread pump stopped')
