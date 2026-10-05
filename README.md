@@ -8,9 +8,11 @@
 
 该 MCP 主要在 x86/x86-64 架构可执行文件及对应 IDA 能力上测试。核心 IDA API 工具、`disasm_bytes` 和 `patch_asm` 同时支持 ARMv8-A/AArch64（`arm64`、`aarch64`、`armv8`、`armv8a`、`armv8-a`）。ARM32/Thumb 目前属于尽力支持范围。
 
-- 77 个 MCP 工具
-- 已在 IDA 9.3 验证；IDA 8+/9.x API 兼容尽力保持
+- 84 个 MCP 工具
+- 已在 IDA 9.3 / 9.4 验证；IDA 8+/9.x API 兼容尽力保持
 - 支持多 IDA 实例自动路由
+- **打开文件即自动开服**（无需手动点菜单，`-A` 无窗口模式同样生效）
+- **可被命令行/AI 全自动拉起**（`tools/ida_auto_mcp` 提供 `ida_auto` MCP，按平台/加载地址/入口点自动加载二进制）
 - 可选 Windows 内核驱动能力
 - 快捷键：`Alt+Shift+I`
 
@@ -22,6 +24,7 @@
 - 结构体、枚举、本地类型、类型化读取
 - 名称、字符串、字节模式、立即数搜索
 - 重命名、注释、类型、补丁、书签、批量操作
+- 会话生命周期：插件状态、分析进度、保存/关闭数据库、退出 IDA、IDA 命令行开关目录
 - 可选内核内存读取、内核模块枚举、IDA 地址到运行时地址映射
 
 ## 安装
@@ -30,29 +33,140 @@
 
 ```text
 plugins/
-  iida_mcp/
+  iida-mcp/
     ida-plugin.json
     iida.py
+    iida_autostart.py        # -S 启动脚本（无窗口自动开服）
     iida_core/
       __init__.py
       cache.py
       kdriver.py
+      lifecycle.py           # 会话生命周期工具
       protocol.py
+      pump.py                # 主线程 pump（无窗口模式下派发 IDA API 调用）
       registry.py
       router.py
       server.py
       thread_safe.py
       tools.py
       worker.py
+    tools/
+      ida_auto_mcp/          # ida-auto：stdio MCP，负责启动/驱动 IDA
+      ida_cli_switches.json  # 扫描出的 IDA 命令行开关目录
+      scan_ida_cli.py        # 开关目录生成/校验脚本
 ```
+
+IDA 9.4 会同时扫描 `<IDA>\plugins` 与 `%APPDATA%\Hex-Rays\IDA Pro\plugins`。两处都安装时插件有防重复保护：后加载的副本会检测到 `iida_core.ACTIVE_PLUGIN` 已被占用并直接退出（日志里记录 `duplicate plugin copy ignored`）。只装一处也可以。
 
 ## 使用
 
 1. 在 IDA 中打开目标文件。
-2. 点击 `Edit > Plugins > iida-mcp`，或按 `Alt+Shift+I` 启动。
+2. 点击 `Edit > Plugins > iida-mcp`，或按 `Alt+Shift+I` 启动/关闭。插件默认在文件加载后自动启动（见下文「自动启动」），菜单/快捷键用于手动启停。
 3. 第一个启动的 IDA 实例监听 `0.0.0.0:13897`，可通过本机回环地址或主机网卡 IP 访问；后续 IDA 实例自动作为 Worker 接入。
 4. 再次点击菜单项或再次按 `Alt+Shift+I`，关闭当前 IDA 实例中的 iida-mcp 服务/连接。
 5. 单 IDB 时工具参数 `f` 可省略；多 IDB 时先调用 `list_files`，再用返回的 file id 指定 `f`。
+
+## 自动启动
+
+打开文件后插件会自己把 MCP 服务拉起来，不需要点菜单：
+
+- `install_startup_watch()` 注册 800ms 定时器，数据库就绪后调用 `_start('autostart')`；
+- 同时安装 `UI_Hooks.ready_to_run()` 作为 GUI 模式下的补充触发点；
+- 两路都失效时（极早阶段、`-A` 无窗口模式等）由 `_thread_autostart(delay=3.0)` 兜底；
+- 需要手动关闭时设 `IIDA_MCP_AUTOSTART=0`（或 `IDA_MCP_AUTOSTART=0`）。
+
+排障日志（同时写 IDA 消息窗口与文件）：`%APPDATA%\Hex-Rays\IDA Pro\mcp\instances\iida-mcp.log`。
+
+实例标记文件（`ida-pro-mcp` 兼容命名，供外部工具发现实例）：
+
+| 文件 | 内容 |
+|------|------|
+| `instance_<port>.json` | `host` / `port` / `pid` / `binary` / `idb_path` / `started_at` / `backend` |
+| `boot_<pid>.json` | `-S` 脚本启动时的原始 `argv`、IDA 版本、状态目录 |
+| `ready_<pid>.json` | `port` / `fid` / `name` / `arch` / `bits` / `input_path` / `idb_path` / `analysis_done` |
+
+健康检查：
+
+```text
+GET http://127.0.0.1:13897/health    # 或 /healthz、/
+```
+
+返回 `ok` / `server` / `version` / `port` / `pid` / `python` / `uptime_s` / `analysis_done` / `hexrays_ready` / `files`。
+
+端口从 `13897` 起向上扫描（最多 100 个，跳过内部端口 13898 与选主端口 13899），因此多个 IDA 实例可以共存。
+
+## 命令行全自动流水线
+
+`tools/ida_auto_mcp/server.py` 是一个**只依赖 Python 标准库**的 stdio MCP server（名字 `ida-auto`），负责在没有人操作的情况下把 IDA 拉起来：
+
+| 工具 | 作用 |
+|------|------|
+| `ida_launch` | 启动 `ida.exe -A -S<iida_autostart.py> …`，按平台/加载地址/入口点/文件类型加载二进制，等 MCP 服务就绪后返回 `pid`/`port`/`fid`/`arch`/`bits`/`analysis_done` |
+| `ida_switches` | 返回扫描出的 IDA 命令行开关目录 |
+| `ida_instances` / `ida_status` | 列出实例 / 查实例健康 |
+| `ida_tools` | 列出该实例暴露的工具（当前 84 个） |
+| `ida_call` | 在任意实例上调用任意 iida-mcp 工具 |
+| `ida_close` | 保存并退出实例（`quit_ida` → 超时兜底强制结束 → 清理标记文件） |
+
+`ida_launch` 参数：`input_path`、`platform`、`load_addr`、`entry`、`file_type`、`out_db`、`compiler`、`log_file`、`directives`、`extra_switches`、`ida_exe`、`timeout`、`quit_after`、`fresh_db`、`script`。
+
+命令行组装要点：
+
+- `ida.exe -A -S<script> [-p<平台>] [-b<加载段>] [-i<入口>] [-T<文件类型>] [-o<输出库>] [-C<编译器>] [-L<日志>] [-d<指令>] … <输入>`
+- `load_addr` 按 IDA 的 `-b` 语义换算成"16 字节段"十六进制（`addr // 16`）；
+- **所有可能含空格的参数值都会加引号**：IDA 会重新解析自己的原始命令行并按空格切分，未加引号的 `-SC:\Users\...\IDA Pro\...` 会被拆成两个参数，表现为 `FATAL ERROR: Can't find input file`；
+- 已存在 `.i64/.idb` 时默认直接打开数据库（避开阻塞式"数据库已存在"弹窗），`fresh_db=true` 时用 `-o` 强制新建。
+
+手动调用：
+
+```powershell
+python -u tools\ida_auto_mcp\selftest.py <file>   # 端到端自检：11 步，退出码 0 全通过
+python tools\ida_auto_mcp\server.py               # 由 MCP 客户端以 stdio 方式拉起
+```
+
+MCP 客户端配置（`ida_auto`，stdio）：
+
+```json
+{
+  "mcpServers": {
+    "ida_auto": {
+      "command": "python",
+      "args": ["<repo>/tools/ida_auto_mcp/server.py"],
+      "env": { "IIDA_MCP_STATE_DIR": "%APPDATA%\\Hex-Rays\\IDA Pro\\mcp\\instances" }
+    }
+  }
+}
+```
+
+在内置 DSH（Tauri Extension）里，这两行写在 profile 补丁层 `%USERPROFILE%\.dsh\profiles\tauri\cordis.patch.yml`：`iida`（streamable-http，`http://127.0.0.1:13897/mcp`）与 `ida_auto`（stdio，上面的 python 命令）。可复用的 bundle 模板与安装/验证步骤见 [`dsh/`](dsh/README.md)。
+
+### IDA 命令行开关目录
+
+`tools/scan_ida_cli.py` 通过 `ida.exe --help` / `-?` 解析出全部开关与 `-z` 调试位：
+
+```powershell
+python tools\scan_ida_cli.py            # 打印摘要
+python tools\scan_ida_cli.py --json     # 重新生成 tools/ida_cli_switches.json
+python tools\scan_ida_cli.py --verify   # 逐个实测确认（当前 30/30）
+```
+
+会话内也可以直接用 `get_cli_switches` 工具读取（`detail=full` 返回完整目录）。
+
+## 环境变量
+
+| 变量 | 作用 |
+|------|------|
+| `IIDA_MCP_AUTOSTART` / `IDA_MCP_AUTOSTART` | `0` 关闭"打开文件即开服" |
+| `IIDA_MCP_STATE_DIR` | 覆盖实例标记目录 |
+| `IIDA_MCP_AUTOSTART_SCRIPT` | 由 `-S` 脚本设置，标记"主线程已被启动脚本接管" |
+| `IIDA_MCP_READY_TIMEOUT` | `-S` 等待服务就绪的超时（默认 1800s） |
+| `IIDA_MCP_QUIT_AFTER` | 就绪后自动退出（秒数或 `now`） |
+| `IIDA_MCP_PUMP_WAIT` | 等待主线程 pump 的秒数（默认 20s） |
+| `IIDA_MCP_PORT` / `IDA_MCP_PORT` | 覆盖起始监听端口 |
+| `IIDA_MCP_SCRIPT_PATH` | 覆盖 launcher 使用的 `iida_autostart.py` 路径 |
+| `IIDA_MCP_IDA_DIR` | 覆盖插件目录探测（找 `plugins/iida-mcp`） |
+| `IIDA_MCP_IDA` / `IDA_DIR` / `IDADIR` / `IDA_PATH` | 覆盖 `ida.exe` 探测 |
+| `IIDA_MCP_TEST_BINARY` | 覆盖 `selftest.py` 的默认测试样本 |
 
 ## MCP 客户端配置
 
@@ -117,6 +231,6 @@ http://192.168.153.1:13897/mcp
 
 | 端口 | 用途 |
 |------|------|
-| `13897` | MCP HTTP 服务，监听所有网卡 |
+| `13897` | MCP HTTP 服务起始端口，监听所有网卡；被占用时向上扫描最多 100 个 |
 | `13898` | 内部 Worker 通信，仅本机 |
 | `13899` | 多 IDA 实例选主锁，仅本机 |

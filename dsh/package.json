@@ -1,0 +1,8 @@
+{
+  "name": "@local/iida-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DeepSeek Harness MCP bridge to IDA Pro: the iida-mcp plugin HTTP server plus the ida-auto launcher (spawns ida.exe -A -S<iida_autostart.py> and drives it headlessly).",
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

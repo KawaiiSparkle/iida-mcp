@@ -3,7 +3,7 @@
   "IDAMetadataDescriptorVersion": 1,
   "plugin": {
     "name": "iida-mcp",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "entryPoint": "iida.py",
     "description": "Expose IDA Pro static analysis capabilities through a local MCP HTTP server.",
     "categories": [
@@ -29,7 +29,8 @@
       }
     ],
     "idaVersions": [
-      "9.3"
+      "9.3",
+      "9.4"
     ],
     "pythonDependencies": [
       "capstone",

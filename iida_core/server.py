@@ -1,7 +1,9 @@
 """Lightweight HTTP MCP server - implements MCP JSON-RPC over Streamable HTTP."""
 import json
+import os
 import threading
 import socket
+import sys
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
@@ -24,7 +26,7 @@ ELECTION_PORT = 13899
 
 SERVER_INFO = {
     "name": "iida-mcp",
-    "version": "0.4.0"
+    "version": "0.5.0"
 }
 
 CAPABILITIES = {
@@ -104,6 +106,8 @@ class McpHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/mcp':
             self._send(405, b'use POST', 'text/plain')
+        elif self.path in ('/health', '/healthz', '/'):
+            self._send_json(self.server.mcp_server.health())
         else:
             self._err(404, 'not found')
 
@@ -136,11 +140,16 @@ class McpHandler(BaseHTTPRequestHandler):
 class McpServer:
     """Master MCP server managing registry, router, and HTTP."""
 
-    def __init__(self, tools_module, local_handler, election_lock=None):
+    def __init__(self, tools_module, local_handler, election_lock=None, port=None, port_scan=100):
         self.registry = Registry()
         self.router = Router(self.registry, local_handler)
         self.tools_module = tools_module
         self._election_lock = election_lock
+        # Actual listen port; may differ from MCP_PORT when that port is taken
+        # by a foreign process (ida-pro-mcp parity: scan a small range upward).
+        self.port = int(port or MCP_PORT)
+        self._port_scan = max(1, int(port_scan))
+        self._started_at = time.time()
         self._http = None
         self._http_thread = None
         self._internal_sock = None
@@ -205,7 +214,20 @@ class McpServer:
                 pass
 
     def _start_http(self):
-        self._http = ThreadedHTTPServer((MCP_BIND_HOST, MCP_PORT), McpHandler)
+        last_err = None
+        self._http = None
+        for candidate in range(self.port, self.port + self._port_scan):
+            if candidate in (INTERNAL_PORT, ELECTION_PORT):
+                continue
+            try:
+                self._http = ThreadedHTTPServer((MCP_BIND_HOST, candidate), McpHandler)
+                self.port = candidate
+                break
+            except OSError as ex:
+                last_err = ex
+                self._http = None
+        if self._http is None:
+            raise last_err or OSError('no free port for the MCP HTTP server')
         self._http.mcp_server = self
         self._http_thread = threading.Thread(target=self._http.serve_forever, daemon=True)
         self._http_thread.start()
@@ -278,6 +300,51 @@ class McpServer:
 
     def get_tools_list(self):
         return self.tools_module.TOOLS_SCHEMA
+
+    def health(self):
+        """Fast, non-blocking instance health report (served on GET /health).
+
+        Used by external launchers to detect readiness, the bound port and the
+        currently registered databases.
+        """
+        files = []
+        try:
+            for entry in self.registry.list_all():
+                files.append({
+                    'fid': entry.fid,
+                    'name': entry.name,
+                    'arch': entry.arch,
+                    'bits': entry.bits,
+                    'path': entry.path,
+                    'pid': entry.pid,
+                    'local': entry.local,
+                })
+        except Exception:
+            pass
+        analysis_done = None
+        try:
+            import ida_auto
+            analysis_done = bool(ida_auto.auto_is_ok())
+        except Exception:
+            pass
+        hexrays_ready = False
+        try:
+            import ida_hexrays
+            hexrays_ready = bool(ida_hexrays.init_hexrays_plugin())
+        except Exception:
+            pass
+        return {
+            'ok': True,
+            'server': SERVER_INFO['name'],
+            'version': SERVER_INFO['version'],
+            'port': self.port,
+            'pid': os.getpid(),
+            'python': sys.version.split()[0],
+            'uptime_s': round(time.time() - self._started_at, 2),
+            'analysis_done': analysis_done,
+            'hexrays_ready': hexrays_ready,
+            'files': files,
+        }
 
     def get_resources_list(self):
         resources = [

@@ -28,6 +28,7 @@ import idc
 from .thread_safe import read, write
 from .cache import get_cache
 from .elf import parse_elf
+from . import lifecycle as _lifecycle
 
 # ============================================================
 # Tool schema definitions (MCP tools/list response)
@@ -47,6 +48,7 @@ def _t(name, desc, params=None):
     return schema
 
 _F = {"type": "string", "description": "file_id"}
+_F_OPT = {"type": "string", "description": "file_id (optional; required when several instances are connected)", "optional": True}
 _A = {"type": "string", "description": "hex address"}
 _N = {"type": "integer", "description": "count", "optional": True}
 _Q = {"type": "string", "description": "filter query", "optional": True}
@@ -90,9 +92,8 @@ TOOLS_SCHEMA = [
     _t("get_name", "Get name/label at address", {"f": _F, "a": _A}),
     _t("set_name", "Set name/label at address", {"f": _F, "a": _A, "name": {"type":"string","description":"new name"}}),
     _t("get_comment", "Get comment at address", {"f": _F, "a": _A, "rep": {"type":"integer","description":"1=repeatable","optional":True}}),
-        _t("set_comment", "Set comment at address", {"f": _F, "a": _A, "cmt": {"type":"string","description":"comment text"}, "rep": {"type":"integer","description":"1=repeatable","optional":True}}),
-    _t("set_pseudocode_comment", "Set Hex-Rays pseudocode comment at address", {"f": _F, "a": _A, "cmt": {"type":"string","description":"comment text"}, "rep": {"type":"integer","description":"1=repeatable","optional":True}}),
     _t("set_comment", "Set comment at address (both disassembly and decompiler/pseudocode views)", {"f": _F, "a": _A, "cmt": {"type":"string","description":"comment text"}, "rep": {"type":"integer","description":"1=repeatable","optional":True}}),
+    _t("set_pseudocode_comment", "Set Hex-Rays pseudocode comment at address", {"f": _F, "a": _A, "cmt": {"type":"string","description":"comment text"}, "rep": {"type":"integer","description":"1=repeatable","optional":True}}),
     _t("search_names", "Search all names/labels by substring", {"f": _F, "q": {"type":"string","description":"substring"}, "n": _N}),
     _t("list_globals", "List named non-function globals (paginated, filterable)", {"f": _F, "q": _Q, "off": _OFF, "n": _N}),
     _t("read_global", "Read a named global value", {"f": _F, "name": {"type":"string","description":"global name"}, "sz": {"type":"integer","description":"override byte size","optional":True}}),
@@ -145,6 +146,12 @@ TOOLS_SCHEMA = [
     _t("disasm_bytes", "Disassemble raw hex bytes (no IDB needed). Returns [[offset, hex, mnemonic, operands], ...]", {"hex": {"type":"string","description":"hex bytes, e.g. 1f2003d5 or 48 89 e5"}, "arch": {"type":"string","description":"x86/x64/arm/arm64/aarch64/armv8a (default x64)","optional":True}, "addr": {"type":"string","description":"base address for display (default 0)","optional":True}}),
     _t("kernel_read_values", "Read kernel memory and interpret as typed values. Use a for one address or addrs for batch. fmt defaults to p(pointer).", {"a": {"type":"string","description":"single kernel virtual address (hex)","optional":True}, "addrs": {"type":"array","description":"batch kernel virtual addresses [hex_addr, ...]","items":{"type":"string"},"optional":True}, "fmt": {"type":"string","description":"format: p(pointer/u64) d(u32) w(u16) b(u8) s(null-term string) or NNx(raw bytes). e.g. p, ppd, 16x. default p","optional":True}}),
     _t("ida_to_runtime", "Convert IDA virtual address to runtime kernel address. Uses runtime module base from driver + IDA segment info to compute correct mapping per-section.", {"f": _F, "a": _A, "mod": {"type":"string","description":"kernel module name (e.g. nvlddmkm)","optional":True}}),
+    _t("ida_plugin_status", "Health/status of this iida-mcp instance: plugin version, pid, MCP port, role (master/worker), autostart flag, IDA version, analysis_done, hexrays/capstone/keystone availability, IDB and input paths"),
+    _t("ida_analysis_state", "Is IDA auto-analysis still running? Use wait_s>0 to poll until finished (blocking, max 1800s). Returns {done, detail, timed_out?}", {"f": _F_OPT, "wait_s": {"type":"number","description":"seconds to poll for completion (0 = just report current state)","optional":True}}),
+    _t("save_database", "Save the current IDA database (IDB) to disk", {"f": _F_OPT, "path": {"type":"string","description":"target .i64/.idb path (default: current IDB path)","optional":True}, "compress": {"type":"boolean","description":"compress the database","optional":True}}),
+    _t("close_database", "Close the current database and keep IDA running (used by automation to release a binary)", {"f": _F_OPT, "save": {"type":"boolean","description":"save before closing (default true)","optional":True}}),
+    _t("quit_ida", "Save (optional) and exit the IDA process hosting this MCP server. Used to finish an automated session", {"f": _F_OPT, "save": {"type":"boolean","description":"save the database before exiting (default true)","optional":True}, "exit_code": {"type":"integer","description":"process exit code (default 0)","optional":True}}),
+    _t("get_cli_switches", "Catalog of IDA command-line switches (ida.exe/idat.exe) used to launch and auto-load binaries: platform (-p), load address (-b), entry point (-i), file type (-T), output database (-o), config directives (-d/-D), scripts (-S), batch/autonomous mode (-B/-A) and the -z debug bitmask", {"detail": {"type":"string","description":"summary (default) or full (includes notes/arg forms)","optional":True}}),
 ]
 
 
@@ -2849,6 +2856,12 @@ DISPATCH = {
     'ida_to_runtime': _ida_to_runtime,
     'calc': _calc,
     'disasm_bytes': _disasm_bytes,
+    'ida_plugin_status': _lifecycle.ida_status,
+    'ida_analysis_state': _lifecycle.wait_analysis,
+    'save_database': _lifecycle.save_database,
+    'close_database': _lifecycle.close_database,
+    'quit_ida': _lifecycle.quit_ida,
+    'get_cli_switches': _lifecycle.get_cli_switches,
 }
 
 

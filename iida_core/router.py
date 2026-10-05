@@ -2,7 +2,12 @@
 import socket
 from . import protocol
 
-_NO_FILE_TOOLS = frozenset(['kernel_read', 'kernel_modules', 'kernel_module_base', 'kernel_read_values', 'calc', 'disasm_bytes'])
+_NO_FILE_TOOLS = frozenset([
+    'kernel_read', 'kernel_modules', 'kernel_module_base', 'kernel_read_values',
+    'calc', 'disasm_bytes',
+    # instance-local automation tools (no database required)
+    'ida_plugin_status', 'get_cli_switches',
+])
 
 
 class Router:

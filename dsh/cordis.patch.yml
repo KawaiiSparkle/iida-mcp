@@ -1,0 +1,45 @@
+# DeepSeek Harness MCP bridge for IDA Pro (iida-mcp)
+#
+# Two MCP servers, both fed by the same plugin/launcher pair:
+#
+#   * iida      - streamable HTTP to the iida-mcp plugin's own server. Any IDA
+#                 instance that loaded the plugin (manually or via ida_launch)
+#                 serves MCP on 127.0.0.1:13897, so this entry gives the model
+#                 direct access to whatever database is currently open.
+#   * ida_auto  - stdio launcher (tools/ida_auto_mcp/server.py). Starts ida.exe
+#                 headlessly with the platform/load-address switches, waits for
+#                 the plugin to come up, then proxies tool calls. Instances are
+#                 addressed as latest | pid:N | port:N | fid | <file name>.
+#
+# serverName must match [A-Za-z0-9_-]{1,32}; tool names become
+# mcp__<serverName>__<tool>.  failOnStartupError stays false so DSH still boots
+# when IDA is not running yet — the client reconnects on demand.
+#
+# Adapt `command` / `args` to your machine: `command` must be a Python 3
+# interpreter that DSH can execute directly (the IDA install's own Python and
+# any stock CPython both work), and `args[0]` must point at this checkout's
+# tools/ida_auto_mcp/server.py.  Paths with spaces are fine here — DSH passes
+# argv directly, there is no shell involved.
+
+- insert:
+    - id: mcp-iida
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: iida
+        transport: streamable-http
+        url: http://127.0.0.1:13897/mcp
+        toolCallTimeoutMs: 600000
+        failOnStartupError: false
+
+    - id: mcp-ida-auto
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: ida_auto
+        transport: stdio
+        command: C:/Users/Administrator/scoop/apps/python/current/python.exe
+        args:
+          - C:/Users/Administrator/.dsh/ungrouped/ssh-iida-mcp/tools/ida_auto_mcp/server.py
+        env:
+          IIDA_MCP_STATE_DIR: C:/Users/Administrator/AppData/Roaming/Hex-Rays/IDA Pro/mcp/instances
+        toolCallTimeoutMs: 900000
+        failOnStartupError: false
