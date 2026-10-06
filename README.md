@@ -1,5 +1,7 @@
 # iida-mcp
 
+[![MCP Toplist](https://mcptoplist.com/badge/pulsemcp%2Fsaileaxh-ida-pro.svg)](https://mcptoplist.com/server/pulsemcp%2Fsaileaxh-ida-pro)
+
 [中文](README.md) | [English](README_EN.md)
 
 ![iida-mcp capability matrix](arts/iida-mcp-capability-matrix.svg)
