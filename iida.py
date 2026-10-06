@@ -28,7 +28,7 @@ import ida_kernwin
 import ida_funcs
 import ida_segment
 
-PLUGIN_VERSION = '0.5.0'
+PLUGIN_VERSION = '0.5.1'
 
 # Ensure our package is importable
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -77,6 +77,59 @@ def _autostart_enabled():
     return True
 
 
+#: Upper bound on how long autostart may wait for auto-analysis before serving
+#: anyway. Normal launches finish analysis in seconds; the cap only exists so a
+#: stuck analysis cannot leave the plugin permanently inert.
+_AUTOSTART_DEFER_LIMIT = 300.0
+
+
+def _analysis_pending():
+    """True while auto-analysis is still running (main thread only).
+
+    Measured on IDA 9.5.261001 with a fresh database: if the autostart callback
+    builds the caches while auto-analysis is still in progress, the analysis that
+    ``ida_auto.auto_wait()`` is driving never finishes - the launch then hangs
+    with no instance file ever published.  Already-analysed databases hid this,
+    because there analysis is complete before the first timer tick.
+
+    ``auto_is_ok()`` may only be called from the main thread; callers off it must
+    route through :mod:`iida_core.thread_safe`.
+    """
+    try:
+        import ida_auto
+        return not bool(ida_auto.auto_is_ok())
+    except Exception:
+        return False
+
+
+def _analysis_pending_safe(timeout=5.0):
+    """``_analysis_pending`` from any thread, without risking a hang.
+
+    ``auto_is_ok()`` is main-thread only, so an off-main caller is routed through
+    :mod:`iida_core.thread_safe`.  Returns True, False, or None when the answer
+    cannot be obtained yet:
+
+    * autonomous session whose pump is not armed -- there is no transport to the
+      main thread, and ``execute_sync`` never returns in ``-A`` sessions, so the
+      caller must defer rather than start;
+    * any other failure -- also reported as None, because guessing "analysis
+      finished" is what wedges the launch.
+    """
+    if threading.current_thread() is threading.main_thread():
+        return _analysis_pending()
+    autonomous = bool(os.environ.get('IIDA_MCP_AUTOSTART_SCRIPT'))
+    try:
+        from iida_core import thread_safe as _ts
+        if not _ts._pump.is_active():
+            if _ts._await_pump(0.5):
+                pass
+            elif autonomous:
+                return None
+        return bool(_ts.run_in_ida(_analysis_pending, timeout=timeout))
+    except Exception:
+        return None
+
+
 def _ida_user_dir():
     if os.name == 'nt':
         base = os.environ.get('APPDATA') or os.path.expanduser('~')
@@ -86,6 +139,13 @@ def _ida_user_dir():
 
 def _instances_dir():
     """Directory holding one discovery file per running IDA instance."""
+    override = os.environ.get('IIDA_MCP_STATE_DIR')
+    if override:
+        try:
+            os.makedirs(override, exist_ok=True)
+            return override
+        except OSError:
+            pass
     for candidate in (os.path.join(_ida_user_dir(), 'mcp', 'instances'),
                       os.path.join(tempfile.gettempdir(), 'iida-mcp-instances')):
         try:
@@ -347,8 +407,53 @@ class IdaMcpPlugMod(idaapi.plugmod_t):
         self._ui_hooks = None
         self._timer_id = None
         self._reloaded = False
+        self._defer_since = None
 
     # -- lifecycle ---------------------------------------------------------
+
+    def _should_defer(self):
+        """True while autostart must wait before bringing the network up.
+
+        Two conditions, both observed on IDA 9.5.261001 with a *fresh* database:
+
+        * automated launch (``-A -S<iida_autostart.py>``) whose script has not
+          armed the main-thread pump yet.  Until it is armed, IDA services no
+          ``execute_sync`` callbacks at all, so a network bring-up started now
+          would block forever - and if it is started from inside the analysis
+          event loop it starves the analysis too, hanging the launch with no
+          instance file.  ``pump.is_active()`` is the exact handover point: the
+          script arms it immediately after analysis completes.
+        * auto-analysis still running in a normal session.  ``auto_is_ok()`` is
+          checked as a secondary signal only - it was measured returning True
+          while ``auto_wait()`` was still blocked, so it is not trustworthy on
+          its own.
+
+        The wait is bounded: if the signal never clears, serving starts anyway
+        rather than leaving the plugin permanently inert.
+        """
+        reason = None
+        autonomous = bool(os.environ.get('IIDA_MCP_AUTOSTART_SCRIPT'))
+        if autonomous:
+            try:
+                from iida_core import pump as _pump
+                if not _pump.is_active():
+                    reason = 'awaiting the startup script (pump not armed)'
+            except Exception:
+                pass
+        if reason is None and _analysis_pending_safe() is not False:
+            reason = 'auto-analysis still running'
+        if reason is None:
+            self._defer_since = None
+            return False
+        if self._defer_since is None:
+            self._defer_since = time.time()
+            _log('autostart deferred: %s' % reason)
+        if time.time() - self._defer_since > _AUTOSTART_DEFER_LIMIT:
+            _log('autostart deferral limit (%.0fs) reached; starting anyway (%s)'
+                 % (_AUTOSTART_DEFER_LIMIT, reason))
+            self._defer_since = None
+            return False
+        return True
 
     def install_startup_watch(self):
         """Autostart from an IDA timer - fires in GUI and ``-A`` autonomous mode.
@@ -371,6 +476,11 @@ class IdaMcpPlugMod(idaapi.plugmod_t):
     def _startup_tick(self):
         if self._started:
             return -1
+        # Never bring the network up mid-analysis: that starves the auto-analysis
+        # that auto_wait() is driving and the whole launch wedges (see
+        # _analysis_pending). Keep ticking until the database is quiet.
+        if self._should_defer():
+            return 800
         _log('startup timer fired -> autostart')
         self._start('autostart')
         return -1
@@ -445,6 +555,14 @@ class IdaMcpPlugMod(idaapi.plugmod_t):
                     return
             except Exception:
                 pass
+            # Even this net must wait for auto-analysis: starting the network
+            # while the analysis that auto_wait() drives is still running wedges
+            # the launch. Poll until the database is quiet, then start.
+            deadline = time.time() + 1800.0
+            while not self._started and time.time() < deadline:
+                if not self._should_defer():
+                    break
+                time.sleep(1.0)
             try:
                 self.maybe_autostart()
             except Exception as ex:
@@ -466,11 +584,27 @@ class IdaMcpPlugMod(idaapi.plugmod_t):
             return False
 
     def maybe_autostart(self):
+        """Start serving, but only once auto-analysis has finished.
+
+        Every entry point funnels through here (startup timer, ``ready_to_run``
+        UI hook, delayed safety-net thread), so the guard cannot be raced.
+        """
         if not _autostart_enabled():
             ida_kernwin.msg('[iida-mcp] autostart disabled (IIDA_MCP_AUTOSTART=0); '
                             'use Edit > Plugins > iida-mcp (Alt-Shift-I)\n')
-            return
+            return False
+        if self._should_defer():
+            # Deferring is only safe if something will ask again. The startup
+            # timer is that something, so make sure it is armed.
+            _log('autostart deferred: auto-analysis still running')
+            if self._timer_id is None:
+                try:
+                    self.install_startup_watch()
+                except Exception:
+                    pass
+            return False
         self._start('autostart')
+        return True
 
     def run(self, arg):
         """Called when the user clicks iida-mcp in Edit>Plugins."""

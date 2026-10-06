@@ -11,14 +11,42 @@ Exits 0 only when every step succeeded.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVER = os.path.join(HERE, 'server.py')
-DEFAULT_BINARY = os.environ.get('IIDA_MCP_TEST_BINARY') or r'C:\Windows\System32\version.dll'
+SOURCE_BINARY = r'C:\Windows\System32\version.dll'
 PYTHON = sys.executable or 'python'
+
+
+def default_binary():
+    """Stage the sample in a writable scratch dir.
+
+    IDA writes the database *next to the input file*. Pointing the test at
+    ``C:\\Windows\\System32\\version.dll`` therefore drops ``version.dll.id0/
+    .id1/.id2/.nam/.til`` into System32; a partially written database left
+    behind by an interrupted run then wedges every later launch. Copy the
+    sample somewhere writable instead.
+    """
+    override = os.environ.get('IIDA_MCP_TEST_BINARY')
+    if override:
+        return override
+    scratch = os.path.join(tempfile.gettempdir(), 'ida-auto-selftest')
+    staged = os.path.join(scratch, 'version.dll')
+    try:
+        os.makedirs(scratch, exist_ok=True)
+        if not os.path.isfile(staged):
+            shutil.copy2(SOURCE_BINARY, staged)
+        return staged
+    except OSError:
+        return SOURCE_BINARY
+
+
+DEFAULT_BINARY = default_binary()
 
 
 class Client:
@@ -84,8 +112,12 @@ def main(argv):
         print('%s %s%s' % ('PASS' if ok else 'FAIL', name, (' - %s' % detail) if detail else ''))
 
     def unwrap(payload):
-        """``ida_call`` wraps the remote tool result under ``result``."""
-        if isinstance(payload, dict) and isinstance(payload.get('result'), (dict, list)):
+        """``ida_call`` wraps the remote tool result under ``result``.
+
+        The wrapped value is not always a container: ``decompile`` returns the
+        pseudocode as a plain string, so unwrap whenever the key is present.
+        """
+        if isinstance(payload, dict) and 'result' in payload:
             return payload['result']
         return payload
 
@@ -140,6 +172,25 @@ def main(argv):
         funcs, _ = client.call('ida_call', {'instance': 'pid:%s' % pid, 'tool': 'list_functions', 'args': {'f': launch['fid'], 'n': 5}})
         funcs_body = unwrap(funcs)
         record('ida_call:list_functions', isinstance(funcs_body, list) and len(funcs_body) >= 1, json.dumps(funcs)[:200])
+
+        # Pseudocode is the reason this pipeline exists: assert real Hex-Rays
+        # output, not merely that the MCP call did not report an error.  A
+        # missing decompiler used to pass here because only the transport was
+        # checked.
+        first_ea = None
+        if isinstance(funcs_body, list) and funcs_body:
+            row = funcs_body[0]
+            first_ea = row[0] if isinstance(row, (list, tuple)) and row else (row.get('ea') if isinstance(row, dict) else None)
+        decomp, _ = client.call('ida_call', {'instance': 'pid:%s' % pid, 'tool': 'decompile', 'args': {'a': str(first_ea)}})
+        decomp_body = unwrap(decomp)
+        code = ''
+        if isinstance(decomp_body, dict):
+            code = decomp_body.get('pseudocode') or decomp_body.get('code') or ''
+        elif isinstance(decomp_body, str):
+            code = decomp_body
+        looks_like_c = ('(' in code and ')' in code and (';' in code or '{' in code))
+        record('ida_call:decompile', bool(first_ea) and len(code) > 20 and looks_like_c,
+               '%s -> %d chars' % (first_ea, len(code)))
 
         if keep:
             print('keeping instance pid=%s port=%s (--keep)' % (pid, launch['port']))

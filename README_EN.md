@@ -8,8 +8,8 @@
 
 This MCP is primarily tested on x86/x86-64 executables and the corresponding IDA capabilities. Core IDA API tools, `disasm_bytes`, and `patch_asm` also support ARMv8-A/AArch64 (`arm64`, `aarch64`, `armv8`, `armv8a`, `armv8-a`). ARM32/Thumb is currently best-effort.
 
-- 77 MCP tools
-- Verified on IDA 9.3; IDA 8+/9.x API compatibility is kept best-effort
+- 84 MCP tools
+- Verified on IDA 9.3 / 9.4 / 9.5 (9.5 measured with IDA 9.5.261001 + Python 3.14.8); IDA 8+/9.x API compatibility is kept best-effort
 - Multi-IDA instance routing
 - Optional Windows kernel driver support
 - Hotkey: `Alt+Shift+I`

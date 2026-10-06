@@ -26,7 +26,7 @@ ELECTION_PORT = 13899
 
 SERVER_INFO = {
     "name": "iida-mcp",
-    "version": "0.5.0"
+    "version": "0.5.1"
 }
 
 CAPABILITIES = {

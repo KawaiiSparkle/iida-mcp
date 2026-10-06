@@ -9,9 +9,9 @@
 该 MCP 主要在 x86/x86-64 架构可执行文件及对应 IDA 能力上测试。核心 IDA API 工具、`disasm_bytes` 和 `patch_asm` 同时支持 ARMv8-A/AArch64（`arm64`、`aarch64`、`armv8`、`armv8a`、`armv8-a`）。ARM32/Thumb 目前属于尽力支持范围。
 
 - 84 个 MCP 工具
-- 已在 IDA 9.3 / 9.4 验证；IDA 8+/9.x API 兼容尽力保持
+- 已在 IDA 9.3 / 9.4 / 9.5 验证（9.5 使用 IDA 9.5.261001 + Python 3.14.8 实测）；IDA 8+/9.x API 兼容尽力保持
 - 支持多 IDA 实例自动路由
-- **打开文件即自动开服**（无需手动点菜单，`-A` 无窗口模式同样生效）
+- **打开文件即自动开服**（无需手动点菜单，`-A` 无窗口模式同样生效；服务会先等自动分析结束再启动，避免把分析卡死）
 - **可被命令行/AI 全自动拉起**（`tools/ida_auto_mcp` 提供 `ida_auto` MCP，按平台/加载地址/入口点自动加载二进制）
 - 可选 Windows 内核驱动能力
 - 快捷键：`Alt+Shift+I`
@@ -68,12 +68,16 @@ IDA 9.4 会同时扫描 `<IDA>\plugins` 与 `%APPDATA%\Hex-Rays\IDA Pro\plugins`
 
 ## 自动启动
 
-打开文件后插件会自己把 MCP 服务拉起来，不需要点菜单：
+两种触发方式：
 
-- `install_startup_watch()` 注册 800ms 定时器，数据库就绪后调用 `_start('autostart')`；
-- 同时安装 `UI_Hooks.ready_to_run()` 作为 GUI 模式下的补充触发点；
-- 两路都失效时（极早阶段、`-A` 无窗口模式等）由 `_thread_autostart(delay=3.0)` 兜底；
-- 需要手动关闭时设 `IIDA_MCP_AUTOSTART=0`（或 `IDA_MCP_AUTOSTART=0`）。
+1. **命令行 `-A -S<iida_autostart.py>`（已实测，推荐，无人值守流水线走这条）**：启动脚本在主线程就绪后直接激活服务，`-A` 自治模式会自动应答 IDA 的阻塞提示框。IDA 9.5 上实测约 5 秒内 `Master on :13897`。
+2. **GUI 打开文件（定时器路径）**：`install_startup_watch()` 注册 800ms 定时器，数据库就绪后调用 `_start('autostart')`；并安装 `UI_Hooks.ready_to_run()` 作为补充触发点；两路都失效时（极早阶段、`-A` 无窗口模式等）由 `_thread_autostart(delay=3.0)` 兜底。
+
+关于方式 2 的实测边界（IDA 9.5.261001）：裸 `ida.exe <file>` 打开一个**已存在 `.i64`**（尤其旧格式库）时会先弹模态确认框（窗口标题变成 `Please confirm`），主线程停在模态循环里，定时器与 `ready_to_run` 都不会跑，服务不会启动；打开**全新文件**时实测同样未在 120 秒内起服务。因此无人值守场景请一律使用方式 1，或先让 IDA 无人值守地打开数据库再挂客户端。
+
+需要手动关闭自动启动时设 `IIDA_MCP_AUTOSTART=0`（或 `IDA_MCP_AUTOSTART=0`），然后在 IDA 中手动 `Alt+Shift+I`。
+
+> **为什么必须等分析结束**：在全新（从未分析过的）数据库上，如果服务在自动分析仍在进行时就连网（自建分析缓存、选主、bind），会饿死 `ida_auto.auto_wait()` 驱动的分析本身，整个启动挂死、永远不写实例文件。实测（IDA 9.5.261001）：`auto_wait()` 在插件空闲时约 1 秒返回，在泵/服务已激活时永不返回。已分析过的数据库会掩盖这个问题（`auto_wait()` 立即返回）。因此 `-S` 脚本先等分析、后接管主线程，插件侧所有自动启动入口也会先确认分析已结束（等待上限 300 秒，超时仍会启动以免彻底失活）。
 
 排障日志（同时写 IDA 消息窗口与文件）：`%APPDATA%\Hex-Rays\IDA Pro\mcp\instances\iida-mcp.log`。
 
@@ -157,7 +161,7 @@ python tools\scan_ida_cli.py --verify   # 逐个实测确认（当前 30/30）
 | 变量 | 作用 |
 |------|------|
 | `IIDA_MCP_AUTOSTART` / `IDA_MCP_AUTOSTART` | `0` 关闭"打开文件即开服" |
-| `IIDA_MCP_STATE_DIR` | 覆盖实例标记目录 |
+| `IIDA_MCP_STATE_DIR` | 覆盖实例标记目录（插件、`-S` 脚本、`lifecycle` 三处一致生效；实测隔离可用） |
 | `IIDA_MCP_AUTOSTART_SCRIPT` | 由 `-S` 脚本设置，标记"主线程已被启动脚本接管" |
 | `IIDA_MCP_READY_TIMEOUT` | `-S` 等待服务就绪的超时（默认 1800s） |
 | `IIDA_MCP_QUIT_AFTER` | 就绪后自动退出（秒数或 `now`） |

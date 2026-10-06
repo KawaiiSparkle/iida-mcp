@@ -1,5 +1,5 @@
 """iida-mcp core - Zero-dependency MCP server for IDA Pro 9"""
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 #: Path of the plugin copy that owns this process.  IDA loads plugin bundles from
 #: both the per-user plugin directory and the installation's ``plugins/``

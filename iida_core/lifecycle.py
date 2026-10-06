@@ -191,12 +191,8 @@ def _autostart_enabled():
 
 
 def _instances_dir():
-    if os.name == 'nt':
-        base = os.environ.get('APPDATA') or os.path.expanduser('~')
-        root = os.path.join(base, 'Hex-Rays', 'IDA Pro')
-    else:
-        root = os.path.join(os.path.expanduser('~'), '.idapro')
-    return os.path.join(root, 'mcp', 'instances')
+    """Discovery directory; honours IIDA_MCP_STATE_DIR like _state_dir()."""
+    return _state_dir()
 
 
 def _is_master_port(server_mod):

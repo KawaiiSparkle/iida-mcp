@@ -310,24 +310,41 @@ def _load_pump():
         return None
 
 
-def _wait_analysis(pump):
-    """Let IDA finish auto-analysis. Runs on the main thread via the pump."""
-    def _auto_wait():
-        try:
-            import ida_auto
-            ida_auto.auto_wait()
-            return True
-        except Exception as ex:
-            _log('auto_wait failed: %s' % ex)
-            return True
+def _wait_analysis():
+    """Finish auto-analysis **before the pump is armed**.
 
-    deadline = time.time() + 30.0
-    while time.time() < deadline and not pump.is_active():
-        time.sleep(0.05)
+    Measured on IDA 9.5.261001 with a fresh (never-analysed) database:
+
+    * ``auto_wait()`` called directly, pump not yet installed -> returns in ~1s;
+    * ``auto_wait()`` called with the pump already installed -> **never returns**.
+
+    The pump is not the problem by itself: ``auto_wait`` drives IDA's own event
+    loop, which dispatches the plugin's pending startup timer. Once the pump is
+    active, ``thread_safe.run_in_ida`` sees ``on_pump_thread()`` for that
+    main-thread timer callback and runs the plugin's whole network bring-up
+    (cache build, election, bind) inline - inside the event loop that analysis
+    still needs. That is the deadlock. Analysis waits observed: 0.90s with the
+    plugin idle, ~1.0s in an equivalent probe.
+
+    Already-analysed databases hid this: there ``auto_wait`` returns instantly and
+    the timer never gets a chance to interleave.
+    """
+    if _analysis_done():
+        return True
     try:
-        pump.submit(_auto_wait, timeout=300.0)
+        import ida_auto
     except Exception as ex:
-        _log('analysis wait via pump failed: %s' % ex)
+        _log('analysis wait skipped: %s' % ex)
+        return False
+    _log('waiting for auto-analysis (pump not yet armed)')
+    started = time.time()
+    try:
+        ida_auto.auto_wait()
+        _log('auto-analysis finished in %.2fs' % (time.time() - started))
+        return True
+    except Exception as ex:
+        _log('auto_wait failed after %.2fs: %s' % (time.time() - started, ex))
+        return False
 
 
 def _schedule_quit_pump(pump, stop_event):
@@ -366,9 +383,12 @@ def _schedule_quit_pump(pump, stop_event):
 
 
 def _watch(pump, stop_event):
-    """Background supervisor: analysis -> instance file -> ready marker."""
+    """Background supervisor: instance file -> ready marker.
+
+    Auto-analysis has already finished by the time this thread starts (it is
+    driven from ``main`` before the pump loop, see :func:`_wait_analysis`).
+    """
     pid = os.getpid()
-    _wait_analysis(pump)
     instance = None
     while time.time() < _deadline:
         instance = _find_instance(pid)
@@ -452,10 +472,16 @@ def main():
     if pump is None:
         _legacy_main()
         return 0
-    # Arm the pump *before* the watcher runs: the plugin may already be calling
-    # thread_safe, and those calls must meet an active pump (never execute_sync).
+    # Analysis FIRST, with the pump still unarmed: auto_wait drives IDA's event
+    # loop, which dispatches the plugin's startup timer; if the pump were already
+    # active that callback would run the plugin's network bring-up inline and
+    # deadlock the analysis (see _wait_analysis). Only then arm the pump - the
+    # plugin may already be calling thread_safe, and those calls must meet an
+    # active pump rather than blocking forever on execute_sync.
+    _wait_analysis()
     pump.install()
-    _log('pump armed from %s' % getattr(pump, '__file__', '?'))
+    _log('pump armed from %s (analysis_done=%s)'
+         % (getattr(pump, '__file__', '?'), _analysis_done()))
     stop_event = threading.Event()
     threading.Thread(target=_watch, args=(pump, stop_event), daemon=True,
                      name='iida-mcp-watch').start()
